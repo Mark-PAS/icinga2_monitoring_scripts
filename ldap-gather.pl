@@ -15,8 +15,8 @@
 #   Install Net::LDAP and copy the Perl script to a suitable location
 #
 # Examples:
-#     $ ldap-gather.pl -H "example.com" -p "636" -D "cn=ldap,dc=example,dc=com" -w "1234567890" -z
-#     $ ldap-gather.pl -H "example.com" -p "389" -D "cn=ldap,dc=example,dc=com" -w "1234567890" -Z
+#     $ ldap-gather.pl -H "example.com" -p "636" -D "cn=ldap,dc=example,dc=com" -w "1234567890" -S
+#     $ ldap-gather.pl -H "example.com" -p "389" -D "cn=ldap,dc=example,dc=com" -w "1234567890" -T
 
 use Net::LDAPS;
 use Getopt::Std;
@@ -33,8 +33,8 @@ sub usage () {
         printf("  -p port    : TCP port to connect to\n");
         printf("  -D bind_dn : Bind dn for server\n");
         printf("  -w bind_pw : Password for bind dn\n");
-        printf("  -z         : Connect using ssl. Mutually exclusive with -Z.\n");
-        printf("  -Z         : Connect using start_tls. Mutually exclusive with -z.\n");
+        printf("  -S         : Connect using ssl. Mutually exclusive with -T.\n");
+        printf("  -T         : Connect using start_tls. Mutually exclusive with -S.\n");
         exit(2);
 }
 
@@ -77,7 +77,7 @@ my $ldap;
 # Get the arguments from the user #
 ###################################
 %options=();
-getopts("hH:p:D:w:zZ",\%options);
+getopts("hH:p:D:w:ST",\%options);
 
 my $port = $options{p} || 389;
 my $host = $options{H} || "localhost";
@@ -88,14 +88,14 @@ if (defined $options{h} ) {
         usage();
 }
 
-if (defined $options{z} && defined $options{Z} ) {
+if (defined $options{S} && defined $options{T} ) {
         usage();
 }
 
 ###################################################
 # Create new connection and bind to the server    #
 ###################################################
-if (defined $options{z} ) {
+if (defined $options{S} ) {
         $ldap = new Net::LDAPS($host, port=> $port) or die "Failed to create socket to $host:$port: Perl error:  $@";
 
         $ldap->bind( "$bind_dn",
@@ -103,7 +103,7 @@ if (defined $options{z} ) {
            "password"     => "$bind_pw",
            "version"  => 3
         ) or die "Failed to bind to LDAP server: Perl error: $@"; }
-if (defined $options{Z} ) {
+if (defined $options{T} ) {
         $ldap = new Net::LDAP($host, port=> $port) or die "Failed to create socket to $host:$port: Perl error:  $@";
         $ldap->start_tls();
         $ldap->bind( "$bind_dn",
