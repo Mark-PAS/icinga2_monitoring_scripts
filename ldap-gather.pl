@@ -15,8 +15,8 @@
 #   Install Net::LDAP and copy the Perl script to a suitable location
 #
 # Examples:
-#     $ ldap-gather.pl -H "example.com" -p "636" -D "cn=ldap,dc=example,dc=com" -w "1234567890" -S
-#     $ ldap-gather.pl -H "example.com" -p "389" -D "cn=ldap,dc=example,dc=com" -w "1234567890" -T
+#     $ ldap-gather.pl -H "example.com" -p "636" -D "cn=ldap,dc=example,dc=com" -P "1234567890" -S
+#     $ ldap-gather.pl -H "example.com" -p "389" -D "cn=ldap,dc=example,dc=com" -P "1234567890" -T
 
 use Net::LDAPS;
 use Getopt::Std;
@@ -27,12 +27,12 @@ use Getopt::Std;
 
 # Create a universal usage routine to call if problems are detected
 sub usage () {
-        printf("Usage: ldap-gather.pl [ -h ] [ -H 'server' ] [ -p 'port' ] [ -D 'bind_dn'] [ -w 'bind_pw' ]\n");
+        printf("Usage: ldap-gather.pl [ -h ] [ -H 'server' ] [ -p 'port' ] [ -D 'bind_dn'] [ -P 'bind_pw' ]\n");
         printf("  -h         : Print help and exit\n");
         printf("  -H server  : Hostname to connect to\n");
         printf("  -p port    : TCP port to connect to\n");
         printf("  -D bind_dn : Bind dn for server\n");
-        printf("  -w bind_pw : Password for bind dn\n");
+        printf("  -P bind_pw : Password for bind dn\n");
         printf("  -S         : Connect using ssl. Mutually exclusive with -T.\n");
         printf("  -T         : Connect using start_tls. Mutually exclusive with -S.\n");
         exit(2);
@@ -77,12 +77,12 @@ my $ldap;
 # Get the arguments from the user #
 ###################################
 %options=();
-getopts("hH:p:D:w:ST",\%options);
+getopts("hH:p:D:P:ST",\%options);
 
 my $port = $options{p} || 389;
 my $host = $options{H} || "localhost";
 my $bind_dn = $options{D} || usage();
-my $bind_pw = $options{w} || usage();
+my $bind_pw = $options{P} || usage();
 
 if (defined $options{h} ) {
         usage();
