@@ -60,7 +60,14 @@
 # Changes:
 # - correct misaligned fields
 # - renaming / parser changes
-
+#
+# by Mark Perkins / mark@perkinsadministrationservices.com.au
+# Version 0.1.1 Apr 2023
+# Changes:
+# - complete re-write of the parser logic to improve immunity
+#   to changes in field names and layouts
+# - removed -d --Device option as incompatible with parser logic changes
+# - removed -W = Wait Time Mode option as not present in sysstat version 11.7.3
 iostat=$(which iostat 2>/dev/null)
 bc=$(which bc 2>/dev/null)
 
@@ -69,28 +76,15 @@ help()
 echo -e "
 Usage:
 
--d =
---Device to be checked. Example: \"-d sda\"
+-i = CPU utilization report
 
-Run only one of i, q, W:
-
--i = IO Check Mode
---Checks Total Transfers/sec, Read IO/Sec, Write IO/Sec, Bytes Read/Sec, Bytes Written/Sec
---warning/critical = Total Transfers/sec,Read IO/Sec,Write IO/Sec,Bytes Read/Sec,Bytes Written/Sec
-
--q = Queue Mode
---Checks Disk Queue Lengths
---warning/critial = Average size of requests, Queue length of requests
-
--W = Wait Time Mode
---Check the time for I/O requests issued to the device to be served. This includes the time spent by the requests in queue and the time spent servicing them.
---warning/critical = Avg I/O Wait Time (ms), Avg Read Wait Time (ms), Avg Write Wait Time (ms), Avg Service Wait Time (ms), Avg CPU Utilization
+-q = device utilization report
 
 -w,-c = pass warning and critical levels respectively. These are not required, but with out them, all queries will return as OK.
 
 -p = Provide performance data for later graphing
 
--g = Since last reboot for system (more for debugging that nagios use!)
+-g = Since last reboot for system
 
 -h = This help
 "
@@ -98,7 +92,7 @@ Run only one of i, q, W:
 
 # Ensuring we have the needed tools:
 if [[ ! -f $iostat ]] || [[ ! -f $bc ]]; then
-echo -e "ERROR: You must have iostat and bc installed in order to run this plugin\n\tuse: apt-get install systat bc\n"
+echo -e "ERROR: You must have iostat and bc installed in order to run this plugin\n"
 exit -1
 fi
 
@@ -107,20 +101,16 @@ queue=0
 waittime=0
 printperfdata=0
 STATE="OK"
-#samples=2i
 samples=2
-status=0
+STATUS=0
 
 MSG=""
-PERFDATA=""
+PERFDATA=" | "
 
 #------------Argument Set-------------
 
-while getopts "d:w:c:ipqWhg" OPT; do
+while getopts "w:c:ipqhg" OPT; do
 case $OPT in
-"d")
-disk=$OPTARG
-;;
 "w")
 warning=$OPTARG
 ;;
@@ -135,9 +125,6 @@ printperfdata=1
 ;;
 "q")
 queue=1
-;;
-"W")
-waittime=1
 ;;
 "g")
 samples=1
@@ -155,80 +142,12 @@ exit -1
 esac
 done
 
-# Autofill if parameters are empty
-if [[ -z "$disk" ]]; then
-disk=sda
-fi
-
-#Checks that only one query type is run
-if [[ $((io+queue+waittime)) -ne "1" ]]; then
-echo "ERROR: select one and only one run mode"
-help
-exit -1
-fi
-
-#set warning and critical to insane value is empty, else set the individual values
-if [[ -z "$warning" ]]; then
-warning=99999
-else
-#TPS with IO, Request size with queue
-warn_1=$(echo $warning | cut -d, -f1)
-#Read/s with IO,Queue Length with queue
-warn_2=$(echo $warning | cut -d, -f2)
-#Write/s with IO
-warn_3=$(echo $warning | cut -d, -f3)
-#KB/s read with IO
-warn_4=$(echo $warning | cut -d, -f4)
-#KB/s written with IO
-warn_5=$(echo $warning | cut -d, -f5)
-#Crude hack due to integer expression later in the script
-warning=1
-fi
-
-if [[ -z "$critical" ]]; then
-critical=99999
-else
-#TPS with IO, Request size with queue
-crit_1=$(echo $critical | cut -d, -f1)
-#Read/s with IO,Queue Length with queue
-crit_2=$(echo $critical | cut -d, -f2)
-#Write/s with IO
-crit_3=$(echo $critical | cut -d, -f3)
-#KB/s read with IO
-crit_4=$(echo $critical | cut -d, -f4)
-#KB/s written with IO
-crit_5=$(echo $critical | cut -d, -f5)
-#Crude hack due to integer expression later in the script
-critical=1
-fi
+PERF_INDEX=0
+IFS=, read -ers -a WARN < <(echo ${warning})
+IFS=, read -ers -a CRIT < <(echo ${critical})
+unset IFS
 
 #------------Argument Set End-------------
-
-#------------Parameter Check-------------
-
-#Checks for sane Disk name:
-if [[ ! -b "/dev/$disk" ]]; then
-echo "ERROR: Device incorrectly specified"
-help
-exit -1
-fi
-
-#Checks for sane warning/critical levels
-if [[ $warning -ne "99999" || $critical -ne "99999" ]]; then
-if [[ "$warn_1" -gt "$crit_1" || "$warn_2" -gt "$crit_2" ]]; then
-echo "ERROR: critical levels must be higher than warning levels"
-help
-exit -1
-elif [[ $io -eq "1" || $waittime -eq "1" ]]; then
-if [[ "$warn_3" -gt "$crit_3" || "$warn_4" -gt "$crit_4" || "$warn_5" -gt "$crit_5" ]]; then
-echo "ERROR: critical levels must be higher than warning levels"
-help
-exit -1
-fi
-fi
-fi
-
-#------------Parameter Check End-------------
 
 # iostat parameters:
 # -m: megabytes
@@ -236,122 +155,152 @@ fi
 # first run of iostat shows statistics since last reboot, second one shows current vaules of hdd
 # -d is the duration for second run, -x the rest
 
-TMPX=$($iostat $disk -x -k -d 10 $samples | grep $disk | tail -1)
-
-#------------IO Test-------------
-
-if [[ "$io" == "1" ]]; then
-
-TMPD=$($iostat $disk -k -d 10 $samples | grep $disk | tail -1)
-#Requests per second:
-tps=$(echo "$TMPD" | awk '{print $2}')
-read_sec=$(echo "$TMPX" | awk '{print $2}')
-written_sec=$(echo "$TMPX" | awk '{print $3}')
-
-#Kb per second:
-kbytes_read_sec=$(echo "$TMPX" | awk '{print $4}')
-kbytes_written_sec=$(echo "$TMPX" | awk '{print $5}')
-
-# "Converting" values to float (string replace , with .)
-tps=${tps/,/.}
-read_sec=${read_sec/,/.}
-written_sec=${written_sec/,/.}
-kbytes_read_sec=${kbytes_read_sec/,/.}
-kbytes_written_sec=${kbytes_written_sec/,/.}
-
-# Comparing the result and setting the correct level:
-if [[ "$warning" -ne "99999" ]]; then
-if [[ "$(echo "$tps >= $warn_1" | bc)" == "1" || "$(echo "$read_sec >= $warn_2" | bc)" == "1" || "$(echo "$written_sec >= $warn_3" | bc)" == "1" || "$(echo "$kbytes_read_sec >= $warn_4" | bc -q)" == "1" || "$(echo "$kbytes_written_sec >= $warn_5" | bc)" == "1" ]]; then
-STATE="WARNING"
-status=1
-fi
-fi
-if [[ "$critical" -ne "99999" ]]; then
-if [[ "$(echo "$tps >= $crit_1" | bc)" == "1" || "$(echo "$read_sec >= $crit_2" | bc -q)" == "1" || "$(echo "$written_sec >= $crit_3" | bc)" == "1" || "$(echo "$kbytes_read_sec >= $crit_4" | bc -q)" == "1" || "$(echo "$kbytes_written_sec >= $crit_5" | bc)" == "1" ]]; then
-STATE="CRITICAL"
-status=2
-fi
-fi
-# Printing the results:
-MSG="$STATE - I/O stats: Transfers/Sec=$tps Read Requests/Sec=$read_sec Write Requests/Sec=$written_sec KBytes Read/Sec=$kbytes_read_sec KBytes_Written/Sec=$kbytes_written_sec"
-PERFDATA=" | total_io_sec=$tps;$warn_1;$crit_1; read_io_sec=$read_sec;$warn_2;$crit_2; write_io_sec=$written_sec;$warn_3;$crit_3; kbytes_read_sec=$kbytes_read_sec;$warn_4;$crit_4; kbytes_written_sec=$kbytes_written_sec;$warn_5;$crit_5;"
+if [[ ${#WARN[@]} -ne ${#CRIT[@]} ]]; then
+echo "ERR: mismatched quantity between warn and crit values"
+exit -1
 fi
 
-#------------IO Test End-------------
+CAPTURE=$($iostat $disk -x -k 10 $samples)
 
-#------------Queue Test-------------
-if [[ "$queue" == "1" ]]; then
-qsize=$(echo "$TMPX" | awk '{print $8}')
-qlength=$(echo "$TMPX" | awk '{print $12}')
-qread_size=$(echo "$TMPX" | awk '{print $13}')
-qwrite_size=$(echo "$TMPX" | awk '{print $14}')
+mapfile -t CAPTURE_ARRAY_ROWS < <(echo "${CAPTURE}")
+CAPTURE_LEN=${#CAPTURE_ARRAY_ROWS[@]}
+BLOCK_LEN=$((${CAPTURE_LEN} - 1))
+BLOCK_LEN=$((${BLOCK_LEN} / $samples))
+START_ROW=$(($samples - 1))
+START_ROW=$((${START_ROW} * ${BLOCK_LEN}))
+START_ROW=$((${START_ROW} + 2))
+DISK_POS_COUNT=$((${BLOCK_LEN} - 6))
+read -ers -a CPU_HEADER < <(echo ${CAPTURE_ARRAY_ROWS[${START_ROW}]})
+CPU_HEADER=("${CPU_HEADER[@]:1}") #removed the 1st element which is row descriptor
+read -ers -a CPU_RESULTS < <(echo ${CAPTURE_ARRAY_ROWS[$((${START_ROW}+1))]})
+INDEX_i=$((${#CPU_HEADER[@]}-1))
+for i in `seq 0 ${INDEX_i}`; do
 
-# "Converting" values to float (string replace , with .)
-qlength=${qlength/,/.}
-qread_size=${qread_size/,/.}
-qwrite_size=${qwrite_size/,/.}
+if [[ "$io" == "1" ]] || [[ "$io" == "0" && "$queue" == "0" ]]; then
+    MSG+=${CPU_HEADER[i]}
+    MSG+="="
+    MSG+=${CPU_RESULTS[i]}
+    MSG+=", "
+    PERFDATA+=${CPU_HEADER[i]}
+    PERFDATA+="="
+    PERFDATA+=${CPU_RESULTS[i]}
+    PERFDATA+=";"
 
-# Comparing the result and setting the correct level:
-if [[ "$warning" -ne "99999" ]]; then
-if [[ "$(echo "$qlength >= $warn_1" | bc)" == "1" || "$(echo "$qread_size >= $warn_2" | bc)" == "1" || "$(echo "$qwrite_size >= $warn_3" | bc)" == "1" ]]; then
-STATE="WARNING"
-status=1
+    if [[ $(echo "${PERF_INDEX} < ${#WARN[@]}" | bc) -eq 1 ]]; then # check actually have a value
+        if [[ ! -z "${WARN[${PERF_INDEX}]}" ]] || [[ ! -z "${CRIT[${PERF_INDEX}]}" ]]; then 
+            if [[ $(echo "${WARN[${PERF_INDEX}]} > ${CRIT[${PERF_INDEX}]}" | bc) -eq 1 ]]; then # sanity check
+                echo "ERR: warn threshold exceeds crit threshold"
+                exit -1
+            fi
+        fi
+    fi
+
+    if [[ $(echo "${PERF_INDEX} < ${#WARN[@]}" | bc) -eq 1 ]]; then # check actually have a value
+        PERFDATA+=${WARN[${PERF_INDEX}]}
+        if [[ ! -z "${WARN[${PERF_INDEX}]}" ]]; then
+            if [[ $(echo "${CPU_RESULTS[i]} > ${WARN[${PERF_INDEX}]}" | bc) -eq 1 ]]; then
+                if [[ $STATUS -lt 1 ]]; then
+                    STATUS=1
+                fi
+            fi
+        fi
+    fi
+
+    PERFDATA+=";"
+
+    if [[ $(echo "${PERF_INDEX} < ${#CRIT[@]}" | bc) -eq 1 ]]; then # check actually have a value
+        PERFDATA+=${CRIT[${PERF_INDEX}]}
+        if [[ ! -z "${CRIT[${PERF_INDEX}]}" ]]; then 
+            if [[ $(echo "${CPU_RESULTS[i]} > ${CRIT[${PERF_INDEX}]}" | bc) -eq 1 ]]; then
+                if [[ $STATUS -lt 2 ]]; then
+                    STATUS=2
+                fi
+            fi
+        fi
+    fi
+
+    PERFDATA+="; "
+    ((PERF_INDEX++))
 fi
-fi
-if [[ "$critical" -ne "99999" ]]; then
-if [[ "$(echo "$qlength >= $crit_1" | bc)" == "1" || "$(echo "$qread_size >= $crit_2" | bc)" == "1" || "$(echo "$qwrite_size >= $crit_3" | bc)" == "1" ]]; then
-STATE="CRITICAL"
-status=2
-fi
-fi
+done
 
-# Printing the results:
-MSG="$STATE - Disk Queue Stats: Average Queue Length=$qlength, Average Read Size=$qread_size kilobytes, Average Write Size=$qwrite_size kilobytes"
-PERFDATA=" | qlength=$qlength;$warn_1;$crit_1; qread_size=$qread_size;$warn_2;$crit_2; qwrite_size=$qwrite_size;$warn_3;$crit_3;"
+for j in `seq 0 ${DISK_POS_COUNT}`; do
+read -ers -a DISK_HEADER < <(echo ${CAPTURE_ARRAY_ROWS[((${START_ROW}+3))]})
+DISK_HEADER=("${DISK_HEADER[@]:1}") #removed the 1st element which is row descriptor
+read -ers -a DISK_RESULTS < <(echo ${CAPTURE_ARRAY_ROWS[((${START_ROW}+4+${j}))]})
+DISK_IDENT=${DISK_RESULTS[0]}
+DISK_RESULTS=("${DISK_RESULTS[@]:1}") #removed the 1st element which is row descriptor
+INDEX_j=$((${#DISK_HEADER[@]}-1))
+for k in `seq 0 ${INDEX_j}`; do
+
+if [[ "$queue" == "1" ]] || [[ "$io" == "0" && "$queue" == "0" ]]; then
+    MSG+=${DISK_IDENT}
+    MSG+="_"
+    MSG+=${DISK_HEADER[k]}
+    MSG+="="
+    MSG+=${DISK_RESULTS[k]}
+    MSG+=", "
+    PERFDATA+=${DISK_IDENT}
+    PERFDATA+="_"
+    PERFDATA+=${DISK_HEADER[k]}
+    PERFDATA+="="
+    PERFDATA+=${DISK_RESULTS[k]}
+    PERFDATA+=";"
+
+    if [[ $(echo "${PERF_INDEX} < ${#WARN[@]}" | bc) -eq 1 ]]; then # check actually have a value
+        if [[ ! -z "${WARN[${PERF_INDEX}]}" ]] || [[ ! -z "${CRIT[${PERF_INDEX}]}" ]]; then 
+            if [[ $(echo "${WARN[${PERF_INDEX}]} > ${CRIT[${PERF_INDEX}]}" | bc) -eq 1 ]]; then # sanity check
+                echo "ERR: warn threshold exceeds crit threshold"
+                exit -1
+            fi
+        fi
+    fi
+
+    if [[ $(echo "${PERF_INDEX} < ${#WARN[@]}" | bc) -eq 1 ]]; then # check actually have a value
+        PERFDATA+=${WARN[${PERF_INDEX}]}
+        if [[ ! -z "${WARN[${PERF_INDEX}]}" ]]; then
+            if [[ $(echo "${CPU_RESULTS[i]} > ${WARN[${PERF_INDEX}]}" | bc) -eq 1 ]]; then
+                if [[ $STATUS -lt 1 ]]; then
+                    STATUS=1
+                fi
+            fi
+        fi
+    fi
+
+    PERFDATA+=";"
+
+    if [[ $(echo "${PERF_INDEX} < ${#CRIT[@]}" | bc) -eq 1 ]]; then # check actually have a value
+        PERFDATA+=${CRIT[${PERF_INDEX}]}
+        if [[ ! -z "${CRIT[${PERF_INDEX}]}" ]]; then
+            if [[ $(echo "${CPU_RESULTS[i]} > ${CRIT[${PERF_INDEX}]}" | bc) -eq 1 ]]; then
+                if [[ $STATUS -lt 2 ]]; then
+                    STATUS=2
+                fi
+            fi
+        fi
+    fi
+
+    PERFDATA+="; "
+    ((PERF_INDEX++))
 fi
+done
+done
 
-#------------Queue Test End-------------
-
-#------------Wait Time Test-------------
-
-#Parse values. Warning - svc time will soon be deprecated and these will need to be changed. Future parser could look at first line (labels) to suggest correct column to return
-if [[ "$waittime" == "1" ]]; then
-avgrwait=$(echo "$TMPX" | awk '{print $10}')
-avgwwait=$(echo "$TMPX" | awk '{print $11}')
-avgsvctime=$(echo "$TMPX" | awk '{print $15}')
-avgcpuutil=$(echo "$TMPX" | awk '{print $16}')
-
-# "Converting" values to float (string replace , with .)
-avgrwait=${avgrwait/,/.}
-avgwwait=${avgwwait/,/.}
-avgsvctime=${avgsvctime/,/.}
-avgcpuutil=${avgcpuutil/,/.}
-
-# Comparing the result and setting the correct level:
-if [[ "$warning" -ne "99999" ]]; then
-if [[ "$(echo "$avgrwait >= $warn_1" | bc -q)" == "1" || "$(echo "$avgwwait >= $warn_2" | bc)" == "1" || "$(echo "$avgsvctime >= $warn_3" | bc -q)" == "1" || "$(echo "$avgcpuutil >= $warn_4" | bc)" == "1" ]]; then
-STATE="WARNING"
-status=1
-fi
-fi
-if [[ "$critical" -ne "99999" ]]; then
-if [[ "$(echo "$avgrwait >= $crit_1" | bc -q)" == "1" || "$(echo "$avgwwait >= $crit_2" | bc)" == "1" || "$(echo "$avgsvctime >= $crit_3" | bc -q)" == "1" || "$(echo "$avgcpuutil >= $crit_4" | bc)" == "1" ]]; then
-STATE="CRITICAL"
-status=2
-fi
-fi
-
-# Printing the results:
-MSG="$STATE - Avg Read Wait Time (ms)=$avgrwait Avg Write Wait Time (ms)=$avgwwait Avg Service Wait Time (ms)=$avgsvctime Avg CPU Utilization=$avgcpuutil"
-PERFDATA=" | avg_r_waittime_ms=$avgrwait;$warn_1;$crit_1; avg_w_waittime_ms=$avgwwait;$warn_2;$crit_2; avg_service_waittime_ms=$avgsvctime;$warn_3;$crit_3; avg_cpu_utilization=$avgcpuutil;$warn_4;$crit_4;"
-fi
-
-#------------Wait Time End-------------
 
 # now output the official result
+if [[ $STATUS -eq 2 ]]; then
+    STATE="CRITICAl"
+elif [[ $STATUS -eq 1 ]]; then
+    STATE="WARNING"
+else
+    STATE="OK"
+fi
+
+MSG="${STATE} - ${MSG}"
+
 echo -n "$MSG"
 if [[ "x$printperfdata" == "x1" ]]; then
 echo -n "$PERFDATA"
 fi
 echo ""
-exit $status
+exit $STATUS
