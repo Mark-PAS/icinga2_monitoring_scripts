@@ -298,7 +298,7 @@ fi
 
 MSG="${STATE} - ${MSG}"
 
-echo -n "$MSG"
+echo -n "${MSG%??}"
 if [[ "x$printperfdata" == "x1" ]]; then
 echo -n "$PERFDATA"
 fi
