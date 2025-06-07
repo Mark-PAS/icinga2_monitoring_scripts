@@ -68,6 +68,20 @@
 #   to changes in field names and layouts
 # - removed -d --Device option as incompatible with parser logic changes
 # - removed -W = Wait Time Mode option as not present in sysstat version 11.7.3
+#
+# by Mark Perkins / mark@perkinsadministrationservices.com.au
+# Version 0.1.2 June 2025
+# Changes:
+# - adjust to handle differences in formatting between:
+#      iostat -V
+#      sysstat version 12.5.4
+#      (C) Sebastien Godard (sysstat <at> orange.fr)
+#
+#   and
+#      iostat -V
+#      sysstat version 11.7.3
+#      (C) Sebastien Godard (sysstat <at> orange.fr)
+
 iostat=$(which iostat 2>/dev/null)
 bc=$(which bc 2>/dev/null)
 
@@ -103,6 +117,7 @@ printperfdata=0
 STATE="OK"
 samples=2
 STATUS=0
+ADJUST=0
 
 MSG=""
 PERFDATA=" | "
@@ -164,12 +179,15 @@ CAPTURE=$($iostat $disk -x -k 10 $samples)
 
 mapfile -t CAPTURE_ARRAY_ROWS < <(echo "${CAPTURE}")
 CAPTURE_LEN=${#CAPTURE_ARRAY_ROWS[@]}
+[ $((CAPTURE_LEN%2)) -eq 0 ] && ADJUST=1
 BLOCK_LEN=$((${CAPTURE_LEN} - 1))
+BLOCK_LEN=$((${CAPTURE_LEN} + ${ADJUST}))
 BLOCK_LEN=$((${BLOCK_LEN} / $samples))
 START_ROW=$(($samples - 1))
 START_ROW=$((${START_ROW} * ${BLOCK_LEN}))
 START_ROW=$((${START_ROW} + 2))
 DISK_POS_COUNT=$((${BLOCK_LEN} - 6))
+DISK_POS_COUNT=$((${DISK_POS_COUNT} - ${ADJUST}))
 read -ers -a CPU_HEADER < <(echo ${CAPTURE_ARRAY_ROWS[${START_ROW}]})
 CPU_HEADER=("${CPU_HEADER[@]:1}") #removed the 1st element which is row descriptor
 read -ers -a CPU_RESULTS < <(echo ${CAPTURE_ARRAY_ROWS[$((${START_ROW}+1))]})
@@ -187,7 +205,7 @@ if [[ "$io" == "1" ]] || [[ "$io" == "0" && "$queue" == "0" ]]; then
     PERFDATA+=";"
 
     if [[ $(echo "${PERF_INDEX} < ${#WARN[@]}" | bc) -eq 1 ]]; then # check actually have a value
-        if [[ ! -z "${WARN[${PERF_INDEX}]}" ]] || [[ ! -z "${CRIT[${PERF_INDEX}]}" ]]; then 
+        if [[ ! -z "${WARN[${PERF_INDEX}]}" ]] || [[ ! -z "${CRIT[${PERF_INDEX}]}" ]]; then
             if [[ $(echo "${WARN[${PERF_INDEX}]} > ${CRIT[${PERF_INDEX}]}" | bc) -eq 1 ]]; then # sanity check
                 echo "ERR: warn threshold exceeds crit threshold"
                 exit -1
@@ -210,7 +228,7 @@ if [[ "$io" == "1" ]] || [[ "$io" == "0" && "$queue" == "0" ]]; then
 
     if [[ $(echo "${PERF_INDEX} < ${#CRIT[@]}" | bc) -eq 1 ]]; then # check actually have a value
         PERFDATA+=${CRIT[${PERF_INDEX}]}
-        if [[ ! -z "${CRIT[${PERF_INDEX}]}" ]]; then 
+        if [[ ! -z "${CRIT[${PERF_INDEX}]}" ]]; then
             if [[ $(echo "${CPU_RESULTS[i]} > ${CRIT[${PERF_INDEX}]}" | bc) -eq 1 ]]; then
                 if [[ $STATUS -lt 2 ]]; then
                     STATUS=2
@@ -248,7 +266,7 @@ if [[ "$queue" == "1" ]] || [[ "$io" == "0" && "$queue" == "0" ]]; then
     PERFDATA+=";"
 
     if [[ $(echo "${PERF_INDEX} < ${#WARN[@]}" | bc) -eq 1 ]]; then # check actually have a value
-        if [[ ! -z "${WARN[${PERF_INDEX}]}" ]] || [[ ! -z "${CRIT[${PERF_INDEX}]}" ]]; then 
+        if [[ ! -z "${WARN[${PERF_INDEX}]}" ]] || [[ ! -z "${CRIT[${PERF_INDEX}]}" ]]; then
             if [[ $(echo "${WARN[${PERF_INDEX}]} > ${CRIT[${PERF_INDEX}]}" | bc) -eq 1 ]]; then # sanity check
                 echo "ERR: warn threshold exceeds crit threshold"
                 exit -1
@@ -304,3 +322,4 @@ echo -n "$PERFDATA"
 fi
 echo ""
 exit $STATUS
+
